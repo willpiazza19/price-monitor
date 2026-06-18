@@ -26,23 +26,21 @@ claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 twilio = TwilioClient(os.environ["TWILIO_ACCOUNT_SID"], os.environ["TWILIO_AUTH_TOKEN"])
 
 SEARCH_QUERIES = [
-    {"site": "Walmart", "query": "TV 4K OLED QLED site:walmart.com"},
-    {"site": "Walmart", "query": "PlayStation Xbox Nintendo console site:walmart.com"},
-    {"site": "Walmart", "query": "laptop MacBook computer site:walmart.com"},
-    {"site": "Walmart", "query": "refrigerator washer dryer dishwasher site:walmart.com"},
-    {"site": "Target", "query": "TV 4K OLED QLED site:target.com"},
-    {"site": "Target", "query": "PlayStation Xbox Nintendo console site:target.com"},
-    {"site": "Target", "query": "refrigerator washer dryer appliance site:target.com"},
-    {"site": "Best Buy", "query": "TV 4K OLED QLED site:bestbuy.com"},
-    {"site": "Best Buy", "query": "PlayStation Xbox Nintendo console site:bestbuy.com"},
+    {"site": "Walmart", "query": "4K TV OLED QLED site:walmart.com"},
+    {"site": "Walmart", "query": "PlayStation 5 Xbox Series X site:walmart.com"},
+    {"site": "Walmart", "query": "laptop MacBook site:walmart.com"},
+    {"site": "Walmart", "query": "refrigerator washer dryer site:walmart.com"},
+    {"site": "Target", "query": "4K TV OLED QLED site:target.com"},
+    {"site": "Target", "query": "PlayStation 5 Xbox Series X site:target.com"},
+    {"site": "Target", "query": "refrigerator washer appliance site:target.com"},
+    {"site": "Best Buy", "query": "4K TV OLED QLED site:bestbuy.com"},
+    {"site": "Best Buy", "query": "PlayStation 5 Xbox Series X site:bestbuy.com"},
     {"site": "Best Buy", "query": "laptop MacBook site:bestbuy.com"},
     {"site": "Best Buy", "query": "refrigerator washer dryer site:bestbuy.com"},
-    {"site": "Home Depot", "query": "refrigerator washer dryer dishwasher site:homedepot.com"},
-    {"site": "Home Depot", "query": "air conditioner microwave appliance site:homedepot.com"},
-    {"site": "Amazon", "query": "TV 4K OLED QLED site:amazon.com"},
-    {"site": "Amazon", "query": "PlayStation Xbox Nintendo console site:amazon.com"},
+    {"site": "Home Depot", "query": "refrigerator washer dryer site:homedepot.com"},
+    {"site": "Amazon", "query": "4K TV OLED QLED site:amazon.com"},
+    {"site": "Amazon", "query": "PlayStation 5 Xbox Series X site:amazon.com"},
     {"site": "Amazon", "query": "laptop MacBook site:amazon.com"},
-    {"site": "Amazon", "query": "refrigerator washer dryer site:amazon.com"},
 ]
 
 PRICE_JUDGE_PROMPT = """You are a price error detector. I will give you a list of products with their listed prices from a retail website.
@@ -68,63 +66,60 @@ Products to analyze:
 {product_list}"""
 
 
-def search_products(query: str, site: str) -> list[dict]:
-    """Search for products using Firecrawl search."""
+def get_urls_from_search(query: str, site: str) -> list[str]:
+    """Get product page URLs from a Firecrawl search."""
     try:
-        results = firecrawl.search(query, limit=10)
-        if not results:
-            return []
-
-        # Handle both dict and object responses from Firecrawl
+        results = firecrawl.search(query, limit=5)
+        urls = []
         if isinstance(results, list):
             items = results
         elif hasattr(results, "data"):
             items = results.data
-        elif hasattr(results, "__iter__"):
-            items = list(results)
         else:
             items = []
+        for r in items:
+            url = r.url if hasattr(r, "url") else r.get("url", "") if isinstance(r, dict) else ""
+            if url:
+                urls.append(url)
+        return urls
+    except Exception as e:
+        log.warning(f"  [{site}] Search failed for '{query}': {e}")
+        return []
 
-        if not items:
-            return []
 
-        content = "\n\n".join(
-            f"URL: {getattr(r, 'url', '') or (r.get('url', '') if isinstance(r, dict) else '')}\n"
-            f"Title: {getattr(r, 'title', '') or (r.get('title', '') if isinstance(r, dict) else '')}\n"
-            f"Description: {getattr(r, 'description', '') or getattr(r, 'snippet', '') or (r.get('description', '') if isinstance(r, dict) else '')}"
-            for r in items
-        )
-
-        if not content.strip():
+def scrape_product_page(url: str, site: str) -> list[dict]:
+    """Scrape a single product page for name and price."""
+    try:
+        result = firecrawl.scrape_url(url, formats=["markdown"])
+        markdown = result.markdown if hasattr(result, "markdown") else ""
+        if not markdown:
             return []
 
         response = claude.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=2048,
+            max_tokens=512,
             messages=[
                 {
                     "role": "user",
                     "content": (
-                        f"Extract product listings from these search results. "
-                        f"Return ONLY a JSON array of objects with keys: name, price (number, no $ sign), url. "
-                        f"Only include items that have both a clear product name and a numeric price visible in the text. "
-                        f"Return ONLY the JSON array, no other text.\n\n"
-                        f"{content[:8000]}"
+                        "Extract the product name and price from this retail page. "
+                        "Return ONLY a JSON object with keys: name (string), price (number, no $ sign). "
+                        "If you cannot find both a clear product name and price, return {}.\n\n"
+                        f"{markdown[:4000]}"
                     ),
                 }
             ],
         )
         text = response.content[0].text.strip()
-        match = re.search(r"\[.*\]", text, re.DOTALL)
+        match = re.search(r"\{.*\}", text, re.DOTALL)
         if not match:
             return []
-        products = json.loads(match.group())
-        for p in products:
-            p["site"] = site
-        log.info(f"  [{site}] '{query}' → {len(products)} products")
-        return products
+        data = json.loads(match.group())
+        if not data.get("name") or not data.get("price"):
+            return []
+        return [{"name": data["name"], "price": data["price"], "url": url, "site": site}]
     except Exception as e:
-        log.warning(f"  [{site}] Search failed for '{query}': {e}")
+        log.warning(f"  [{site}] Failed to scrape {url}: {e}")
         return []
 
 
@@ -203,24 +198,27 @@ def send_sms_alert(product: dict):
 def run_scan():
     """Run a full scan across all configured search queries."""
     log.info(f"=== Scan started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
-    total_products = 0
-    total_flagged = 0
     all_products = []
 
     for target in SEARCH_QUERIES:
-        products = search_products(target["query"], target["site"])
-        all_products.extend(products)
+        site = target["site"]
+        query = target["query"]
+        urls = get_urls_from_search(query, site)
+        for url in urls:
+            products = scrape_product_page(url, site)
+            all_products.extend(products)
+            if products:
+                log.info(f"  [{site}] {products[0]['name']} @ ${products[0]['price']}")
 
     total_products = len(all_products)
     log.info(f"Total products found: {total_products}")
 
-    # Process in batches of 50
+    total_flagged = 0
     batch_size = 50
     for i in range(0, len(all_products), batch_size):
         batch = all_products[i : i + batch_size]
         flagged = check_prices_with_claude(batch)
         total_flagged += len(flagged)
-
         for product in flagged:
             log.warning(
                 f"PRICE ERROR: {product['name']} @ ${product['price']} on {product['site']} — {product['reason']}"
