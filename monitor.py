@@ -75,10 +75,24 @@ def search_products(query: str, site: str) -> list[dict]:
         if not results:
             return []
 
-        # Extract product data from search results using Claude
+        # Handle both dict and object responses from Firecrawl
+        if isinstance(results, list):
+            items = results
+        elif hasattr(results, "data"):
+            items = results.data
+        elif hasattr(results, "__iter__"):
+            items = list(results)
+        else:
+            items = []
+
+        if not items:
+            return []
+
         content = "\n\n".join(
-            f"URL: {r.get('url', '')}\nTitle: {r.get('title', '')}\nDescription: {r.get('description', '') or r.get('snippet', '')}"
-            for r in (results if isinstance(results, list) else results.get("data", []))
+            f"URL: {getattr(r, 'url', '') or (r.get('url', '') if isinstance(r, dict) else '')}\n"
+            f"Title: {getattr(r, 'title', '') or (r.get('title', '') if isinstance(r, dict) else '')}\n"
+            f"Description: {getattr(r, 'description', '') or getattr(r, 'snippet', '') or (r.get('description', '') if isinstance(r, dict) else '')}"
+            for r in items
         )
 
         if not content.strip():
