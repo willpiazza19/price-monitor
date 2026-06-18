@@ -1,103 +1,61 @@
-# Price Error Monitor
+# Deal Alert Monitor
 
-Automatically scans Walmart, Target, Best Buy, Home Depot, and Amazon every 15 minutes for obvious pricing errors and sends SMS alerts via Twilio.
+Watches public deal feeds (Slickdeals + Reddit deal communities) and texts you when a genuinely strong deal matching your interests appears. No web scraping, no anti-bot fights, no Firecrawl — just reliable public RSS feeds + Claude to filter for the good stuff.
 
 ## How it works
 
-1. **Scrapes** product listings from electronics, TVs, gaming, and appliances categories using Firecrawl
-2. **Analyzes** each product's price with Claude (`claude-sonnet-4-6`) to detect obvious errors (e.g., a 65" TV for $12)
-3. **Sends SMS** via Twilio when a price error is detected, including the product name, price, reason, and direct link
+1. **Reads** public deal feeds every 10 minutes (Slickdeals, r/deals, r/buildapcsales, r/GameDeals, etc.)
+2. **Filters** new deals with Claude (`claude-sonnet-4-6`) against your interests — only the genuinely strong ones pass
+3. **Texts** you via Twilio with the deal title, why it's good, and a direct link
+
+On startup it silently records all current deals (so you aren't blasted with old ones), then only alerts on *new* deals going forward.
 
 ---
 
 ## Setup
 
-### 1. Clone / download the files
-
-Make sure you have these files in a folder:
-```
-price-monitor/
-├── monitor.py
-├── requirements.txt
-├── .env.example
-└── README.md
-```
-
-### 2. Create a Python virtual environment (recommended)
-
+### 1. Install dependencies
 ```bash
 cd price-monitor
 python3 -m venv venv
-source venv/bin/activate    # Windows: venv\Scripts\activate
-```
-
-### 3. Install dependencies
-
-```bash
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 4. Configure credentials
-
-Copy the example env file and fill in your keys:
-
+### 2. Configure credentials
 ```bash
 cp .env.example .env
+open .env
 ```
-
-Open `.env` and fill in:
 
 | Variable | Where to get it |
 |---|---|
-| `FIRECRAWL_API_KEY` | [firecrawl.dev](https://firecrawl.dev) — sign up for a free or paid plan |
 | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com) |
 | `TWILIO_ACCOUNT_SID` | [console.twilio.com](https://console.twilio.com) → Account Info |
 | `TWILIO_AUTH_TOKEN` | [console.twilio.com](https://console.twilio.com) → Account Info |
 | `TWILIO_FROM_NUMBER` | Your Twilio phone number (e.g. `+15005550006`) |
-| `TWILIO_TO_NUMBER` | Your personal number to receive alerts (e.g. `+14155551234`) |
+| `TWILIO_TO_NUMBER` | Your personal number to receive alerts |
 
-### 5. Run the monitor
+> Firecrawl is **no longer needed** — you can stop paying for it.
 
+### 3. Run
 ```bash
 python monitor.py
 ```
 
-The monitor will:
-- Run an immediate scan on startup
-- Schedule a scan every 15 minutes automatically
-- Log all activity to the console and to `monitor.log`
-
-Press `Ctrl+C` to stop.
-
 ---
 
-## What gets scanned
+## Customizing
 
-| Site | Categories |
-|---|---|
-| Walmart | TVs, Video Games, Computers, Appliances |
-| Target | TVs/Home Theater, Video Games, Appliances |
-| Best Buy | Flat Screen TVs, Video Games, Appliances |
-| Home Depot | Appliances, Refrigerators |
-| Amazon | Electronics, Video Games, Appliances |
+Open `monitor.py` and edit:
 
----
-
-## SMS alert format
-
-When a price error is detected you'll receive a text like:
-
-```
-PRICE ERROR ALERT
-Site: Best Buy
-Product: Samsung 75" QLED 4K TV
-Listed Price: $19
-Reason: A 75-inch QLED TV typically retails for $800-$2500; $19 is clearly an error
-Link: https://www.bestbuy.com/site/...
-```
+- **`INTERESTS`** — describe in plain English what deals you want. Claude uses this to decide what to alert on.
+- **`FEEDS`** — add or remove deal feeds. Any RSS/Atom URL works (most subreddits support `https://www.reddit.com/r/NAME/new/.rss`).
+- **`MAX_ALERTS_PER_CYCLE`** — cap how many texts you get per scan (default 5).
+- The scan interval (default 10 minutes) is set in `main()`.
 
 ---
 
 ## Logs
 
-All scans are logged to `monitor.log` in the same directory. Each entry shows the timestamp, number of products scanned, and any flagged errors.
+All activity is logged to the console and to `monitor.log`, showing each scan, how many new deals were found, how many matched, and how many alerts were sent.

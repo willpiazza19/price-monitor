@@ -1,11 +1,10 @@
 import os
-import json
-import re
+import time
 import logging
 from datetime import datetime
 from dotenv import load_dotenv
 from apscheduler.schedulers.blocking import BlockingScheduler
-from firecrawl import FirecrawlApp
+import feedparser
 import anthropic
 from twilio.rest import Client as TwilioClient
 
@@ -21,126 +20,94 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-firecrawl = FirecrawlApp(api_key=os.environ["FIRECRAWL_API_KEY"])
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 twilio = TwilioClient(os.environ["TWILIO_ACCOUNT_SID"], os.environ["TWILIO_AUTH_TOKEN"])
 
-SEARCH_QUERIES = [
-    {"site": "Walmart", "query": "4K TV OLED QLED site:walmart.com"},
-    {"site": "Walmart", "query": "PlayStation 5 Xbox Series X site:walmart.com"},
-    {"site": "Walmart", "query": "laptop MacBook site:walmart.com"},
-    {"site": "Walmart", "query": "refrigerator washer dryer site:walmart.com"},
-    {"site": "Target", "query": "4K TV OLED QLED site:target.com"},
-    {"site": "Target", "query": "PlayStation 5 Xbox Series X site:target.com"},
-    {"site": "Target", "query": "refrigerator washer appliance site:target.com"},
-    {"site": "Best Buy", "query": "4K TV OLED QLED site:bestbuy.com"},
-    {"site": "Best Buy", "query": "PlayStation 5 Xbox Series X site:bestbuy.com"},
-    {"site": "Best Buy", "query": "laptop MacBook site:bestbuy.com"},
-    {"site": "Best Buy", "query": "refrigerator washer dryer site:bestbuy.com"},
-    {"site": "Home Depot", "query": "refrigerator washer dryer site:homedepot.com"},
-    {"site": "Amazon", "query": "4K TV OLED QLED site:amazon.com"},
-    {"site": "Amazon", "query": "PlayStation 5 Xbox Series X site:amazon.com"},
-    {"site": "Amazon", "query": "laptop MacBook site:amazon.com"},
+USER_AGENT = "price-monitor-bot/1.0 (personal deal alerter)"
+
+# Public deal feeds — RSS/Atom, designed to be read by bots, never blocked.
+FEEDS = [
+    {"name": "Slickdeals Frontpage", "url": "https://slickdeals.net/newsearch.php?mode=frontpage&searcharea=deals&searchin=first&rss=1"},
+    {"name": "Slickdeals Popular", "url": "https://feeds.feedburner.com/SlickdealsnetFP"},
+    {"name": "r/deals", "url": "https://www.reddit.com/r/deals/new/.rss"},
+    {"name": "r/buildapcsales", "url": "https://www.reddit.com/r/buildapcsales/new/.rss"},
+    {"name": "r/GameDeals", "url": "https://www.reddit.com/r/GameDeals/new/.rss"},
+    {"name": "r/Frugal_Tech", "url": "https://www.reddit.com/r/Frugal_Tech/new/.rss"},
 ]
 
-PRICE_JUDGE_PROMPT = """You are a price error detector. I will give you a list of products with their listed prices from a retail website.
+# What you care about. Edit this freely — Claude uses it to decide what to alert on.
+INTERESTS = """TVs (4K, OLED, QLED), electronics, gaming consoles (PlayStation, Xbox, Nintendo),
+video games, laptops and computers, and home appliances (refrigerators, washers, dryers, dishwashers).
+The goal is to catch genuinely strong deals — steep discounts, all-time-low prices, or items with
+good resale value."""
 
-For each product, determine if the price looks like an OBVIOUS pricing error — meaning the price is absurdly low compared to what this type of product normally retails for. Examples:
-- A 65" OLED TV listed at $49
-- A PlayStation 5 listed at $12
-- A refrigerator listed at $8
-- A laptop listed at $0.99
+MAX_ALERTS_PER_CYCLE = 5  # avoid getting blasted with texts
 
-Do NOT flag:
-- Normal sale prices (20-50% off)
-- Refurbished items at lower prices
-- Accessories or small items at low prices
-- Products where low price makes sense
+DEAL_JUDGE_PROMPT = """You are a deal-evaluation assistant. The user resells consumer electronics and wants alerts ONLY for genuinely strong deals matching their interests.
 
-For each product, respond in this exact format (one line per product):
-PRODUCT_INDEX|YES or NO|REASON
+User's interests:
+{interests}
 
-Only flag obvious errors where the price is clearly wrong by a massive amount.
+Below is a numbered list of deals pulled from deal-aggregator feeds. Select ONLY the ones that are BOTH:
+1. Clearly in the user's interest categories, AND
+2. Genuinely strong deals (steep discount, notable price, or good resale potential).
 
-Products to analyze:
-{product_list}"""
+Be SELECTIVE. It is better to flag 1-2 great deals than 10 mediocre ones. Skip generic, low-value, or accessory deals.
+
+For each deal you select, output exactly one line in this format:
+INDEX|REASON
+
+Where INDEX is the number and REASON is a short phrase on why it's worth it. Output nothing for deals you don't select. If none qualify, output nothing.
+
+Deals:
+{deal_list}"""
+
+# In-memory record of deals we've already processed. Reset on restart (which is fine —
+# we re-seed silently so you never get spammed with old deals after a redeploy).
+seen_ids = set()
+first_run = True
 
 
-def get_urls_from_search(query: str, site: str) -> list[str]:
-    """Get product page URLs from a Firecrawl search."""
+def fetch_feed(feed: dict) -> list[dict]:
+    """Fetch and parse one RSS/Atom feed."""
     try:
-        results = firecrawl.search(query, limit=5)
-        urls = []
-        if isinstance(results, list):
-            items = results
-        elif hasattr(results, "data"):
-            items = results.data
-        else:
-            items = []
-        for r in items:
-            url = r.url if hasattr(r, "url") else r.get("url", "") if isinstance(r, dict) else ""
-            if url:
-                urls.append(url)
-        return urls
-    except Exception as e:
-        log.warning(f"  [{site}] Search failed for '{query}': {e}")
-        return []
-
-
-def scrape_product_page(url: str, site: str) -> list[dict]:
-    """Scrape a single product page for name and price."""
-    try:
-        result = firecrawl.scrape_url(url, formats=["markdown"])
-        markdown = result.markdown if hasattr(result, "markdown") else ""
-        if not markdown:
-            return []
-
-        response = claude.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=512,
-            messages=[
+        parsed = feedparser.parse(feed["url"], agent=USER_AGENT)
+        entries = []
+        for e in parsed.entries:
+            link = e.get("link", "")
+            key = e.get("id") or link or e.get("title", "")
+            if not key:
+                continue
+            entries.append(
                 {
-                    "role": "user",
-                    "content": (
-                        "Extract the product name and price from this retail page. "
-                        "Return ONLY a JSON object with keys: name (string), price (number, no $ sign). "
-                        "If you cannot find both a clear product name and price, return {}.\n\n"
-                        f"{markdown[:4000]}"
-                    ),
+                    "key": key,
+                    "title": e.get("title", "").strip(),
+                    "link": link,
+                    "source": feed["name"],
                 }
-            ],
-        )
-        text = response.content[0].text.strip()
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if not match:
-            return []
-        data = json.loads(match.group())
-        if not data.get("name") or not data.get("price"):
-            return []
-        return [{"name": data["name"], "price": data["price"], "url": url, "site": site}]
+            )
+        log.info(f"  [{feed['name']}] {len(entries)} items")
+        return entries
     except Exception as e:
-        log.warning(f"  [{site}] Failed to scrape {url}: {e}")
+        log.warning(f"  [{feed['name']}] Failed to fetch: {e}")
         return []
 
 
-def check_prices_with_claude(products: list[dict]) -> list[dict]:
-    """Send a batch of products to Claude for price error detection."""
-    if not products:
+def judge_deals(deals: list[dict]) -> list[dict]:
+    """Ask Claude which deals are worth alerting on."""
+    if not deals:
         return []
 
-    product_list = "\n".join(
-        f"{i}. {p['name']} | ${p.get('price', 'N/A')}"
-        for i, p in enumerate(products)
-    )
+    deal_list = "\n".join(f"{i}. {d['title']} ({d['source']})" for i, d in enumerate(deals))
 
     try:
         response = claude.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=2048,
+            max_tokens=1024,
             messages=[
                 {
                     "role": "user",
-                    "content": PRICE_JUDGE_PROMPT.format(product_list=product_list),
+                    "content": DEAL_JUDGE_PROMPT.format(interests=INTERESTS, deal_list=deal_list),
                 }
             ],
         )
@@ -151,93 +118,78 @@ def check_prices_with_claude(products: list[dict]) -> list[dict]:
 
     flagged = []
     for line in text.strip().splitlines():
-        parts = line.strip().split("|")
-        if len(parts) != 3:
+        parts = line.strip().split("|", 1)
+        if len(parts) != 2:
             continue
-        idx_str, verdict, reason = parts
-        if verdict.strip().upper() != "YES":
-            continue
+        idx_str, reason = parts
         try:
             idx = int(idx_str.strip())
-            product = products[idx]
-            flagged.append({**product, "reason": reason.strip()})
+            flagged.append({**deals[idx], "reason": reason.strip()})
         except (ValueError, IndexError):
             continue
 
     return flagged
 
 
-def send_sms_alert(product: dict):
-    """Send an SMS alert for a flagged price error."""
-    name = product.get("name", "Unknown Product")
-    price = product.get("price", "N/A")
-    reason = product.get("reason", "")
-    site = product.get("site", "")
-    url = product.get("url", "No link available")
-
+def send_sms_alert(deal: dict):
+    """Send an SMS alert for a flagged deal."""
     body = (
-        f"PRICE ERROR ALERT\n"
-        f"Site: {site}\n"
-        f"Product: {name}\n"
-        f"Listed Price: ${price}\n"
-        f"Reason: {reason}\n"
-        f"Link: {url}"
+        f"DEAL ALERT ({deal['source']})\n"
+        f"{deal['title']}\n"
+        f"Why: {deal['reason']}\n"
+        f"Link: {deal['link']}"
     )
-
     try:
         twilio.messages.create(
             body=body,
             from_=os.environ["TWILIO_FROM_NUMBER"],
             to=os.environ["TWILIO_TO_NUMBER"],
         )
-        log.info(f"SMS sent for: {name} @ ${price}")
+        log.info(f"SMS sent: {deal['title']}")
     except Exception as e:
-        log.error(f"Failed to send SMS for {name}: {e}")
+        log.error(f"Failed to send SMS for '{deal['title']}': {e}")
 
 
 def run_scan():
-    """Run a full scan across all configured search queries."""
+    """Fetch all feeds, find new deals, judge them, and alert."""
+    global first_run
     log.info(f"=== Scan started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
-    all_products = []
 
-    for target in SEARCH_QUERIES:
-        site = target["site"]
-        query = target["query"]
-        urls = get_urls_from_search(query, site)
-        for url in urls:
-            products = scrape_product_page(url, site)
-            all_products.extend(products)
-            if products:
-                log.info(f"  [{site}] {products[0]['name']} @ ${products[0]['price']}")
+    new_deals = []
+    for feed in FEEDS:
+        for entry in fetch_feed(feed):
+            if entry["key"] not in seen_ids:
+                seen_ids.add(entry["key"])
+                new_deals.append(entry)
+        time.sleep(2)  # avoid Reddit rate-limiting on rapid sequential requests
 
-    total_products = len(all_products)
-    log.info(f"Total products found: {total_products}")
+    if first_run:
+        log.info(f"Seeded {len(seen_ids)} existing deals (no alerts on first run).")
+        first_run = False
+        log.info("=== Scan complete (initial seed) ===")
+        return
 
-    total_flagged = 0
-    batch_size = 50
-    for i in range(0, len(all_products), batch_size):
-        batch = all_products[i : i + batch_size]
-        flagged = check_prices_with_claude(batch)
-        total_flagged += len(flagged)
-        for product in flagged:
-            log.warning(
-                f"PRICE ERROR: {product['name']} @ ${product['price']} on {product['site']} — {product['reason']}"
-            )
-            send_sms_alert(product)
+    log.info(f"{len(new_deals)} new deals since last scan")
+
+    flagged = judge_deals(new_deals)
+    for deal in flagged[:MAX_ALERTS_PER_CYCLE]:
+        log.warning(f"DEAL: {deal['title']} — {deal['reason']}")
+        send_sms_alert(deal)
 
     log.info(
-        f"=== Scan complete: {total_products} products scanned, {total_flagged} errors flagged ==="
+        f"=== Scan complete: {len(new_deals)} new, {len(flagged)} matched, "
+        f"{min(len(flagged), MAX_ALERTS_PER_CYCLE)} alerts sent ==="
     )
 
 
 def main():
-    log.info("Price Error Monitor starting up...")
-    log.info("Running initial scan...")
+    log.info("Deal Alert Monitor starting up...")
+    log.info("Running initial scan (seeding existing deals)...")
     run_scan()
 
     scheduler = BlockingScheduler()
-    scheduler.add_job(run_scan, "interval", minutes=15, id="price_scan")
-    log.info("Scheduler started — scanning every 15 minutes. Press Ctrl+C to stop.")
+    scheduler.add_job(run_scan, "interval", minutes=10, id="deal_scan")
+    log.info("Scheduler started — scanning every 10 minutes. Press Ctrl+C to stop.")
 
     try:
         scheduler.start()

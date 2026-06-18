@@ -1,5 +1,5 @@
 anthropic>=0.40.0
-firecrawl-py>=1.0.0
+feedparser>=6.0.0
 twilio>=9.0.0
 apscheduler>=3.10.0
 python-dotenv>=1.0.0
