@@ -25,47 +25,24 @@ firecrawl = FirecrawlApp(api_key=os.environ["FIRECRAWL_API_KEY"])
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 twilio = TwilioClient(os.environ["TWILIO_ACCOUNT_SID"], os.environ["TWILIO_AUTH_TOKEN"])
 
-SCAN_TARGETS = [
-    {
-        "site": "Walmart",
-        "urls": [
-            "https://www.walmart.com/browse/electronics/televisions/3944_1060825_447913",
-            "https://www.walmart.com/browse/electronics/video-games/3944_7551309",
-            "https://www.walmart.com/browse/electronics/computers/3944_3951_1089430",
-            "https://www.walmart.com/browse/appliances/3736_90548",
-        ],
-    },
-    {
-        "site": "Target",
-        "urls": [
-            "https://www.target.com/c/tvs-home-theater-electronics/-/N-5xsx0",
-            "https://www.target.com/c/video-games-electronics/-/N-5xsxd",
-            "https://www.target.com/c/appliances/-/N-55atp",
-        ],
-    },
-    {
-        "site": "Best Buy",
-        "urls": [
-            "https://www.bestbuy.com/site/tvs/all-flat-screen-tvs/pcmcat159700050011.c",
-            "https://www.bestbuy.com/site/video-games/pcmcat142200050005.c",
-            "https://www.bestbuy.com/site/appliances/pcmcat319900050000.c",
-        ],
-    },
-    {
-        "site": "Home Depot",
-        "urls": [
-            "https://www.homedepot.com/b/Appliances/N-5yc1vZc3pi",
-            "https://www.homedepot.com/b/Appliances-Refrigerators/N-5yc1vZc3poZ1z175gu",
-        ],
-    },
-    {
-        "site": "Amazon",
-        "urls": [
-            "https://www.amazon.com/s?i=electronics&bbn=172282&rh=n%3A172282%2Cn%3A1266092011",
-            "https://www.amazon.com/s?i=videogames&bbn=468642&rh=n%3A468642",
-            "https://www.amazon.com/s?i=appliances&bbn=2619526011",
-        ],
-    },
+SEARCH_QUERIES = [
+    {"site": "Walmart", "query": "TV 4K OLED QLED site:walmart.com"},
+    {"site": "Walmart", "query": "PlayStation Xbox Nintendo console site:walmart.com"},
+    {"site": "Walmart", "query": "laptop MacBook computer site:walmart.com"},
+    {"site": "Walmart", "query": "refrigerator washer dryer dishwasher site:walmart.com"},
+    {"site": "Target", "query": "TV 4K OLED QLED site:target.com"},
+    {"site": "Target", "query": "PlayStation Xbox Nintendo console site:target.com"},
+    {"site": "Target", "query": "refrigerator washer dryer appliance site:target.com"},
+    {"site": "Best Buy", "query": "TV 4K OLED QLED site:bestbuy.com"},
+    {"site": "Best Buy", "query": "PlayStation Xbox Nintendo console site:bestbuy.com"},
+    {"site": "Best Buy", "query": "laptop MacBook site:bestbuy.com"},
+    {"site": "Best Buy", "query": "refrigerator washer dryer site:bestbuy.com"},
+    {"site": "Home Depot", "query": "refrigerator washer dryer dishwasher site:homedepot.com"},
+    {"site": "Home Depot", "query": "air conditioner microwave appliance site:homedepot.com"},
+    {"site": "Amazon", "query": "TV 4K OLED QLED site:amazon.com"},
+    {"site": "Amazon", "query": "PlayStation Xbox Nintendo console site:amazon.com"},
+    {"site": "Amazon", "query": "laptop MacBook site:amazon.com"},
+    {"site": "Amazon", "query": "refrigerator washer dryer site:amazon.com"},
 ]
 
 PRICE_JUDGE_PROMPT = """You are a price error detector. I will give you a list of products with their listed prices from a retail website.
@@ -91,28 +68,34 @@ Products to analyze:
 {product_list}"""
 
 
-def scrape_products(url: str, site: str) -> list[dict]:
-    """Scrape product listings from a URL using Firecrawl."""
+def search_products(query: str, site: str) -> list[dict]:
+    """Search for products using Firecrawl search."""
     try:
-        result = firecrawl.scrape_url(url, formats=["markdown"])
-        markdown = result.markdown if hasattr(result, "markdown") else result.get("markdown", "")
-        if not markdown:
-            log.warning(f"  [{site}] No content returned from {url}")
+        results = firecrawl.search(query, limit=10)
+        if not results:
             return []
 
-        # Use Claude to extract products from the raw markdown
+        # Extract product data from search results using Claude
+        content = "\n\n".join(
+            f"URL: {r.get('url', '')}\nTitle: {r.get('title', '')}\nDescription: {r.get('description', '') or r.get('snippet', '')}"
+            for r in (results if isinstance(results, list) else results.get("data", []))
+        )
+
+        if not content.strip():
+            return []
+
         response = claude.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=4096,
+            max_tokens=2048,
             messages=[
                 {
                     "role": "user",
                     "content": (
-                        f"Extract all product listings from this retail page markdown. "
+                        f"Extract product listings from these search results. "
                         f"Return ONLY a JSON array of objects with keys: name, price (number, no $ sign), url. "
-                        f"Only include items that have both a name and a numeric price. "
-                        f"Return up to 100 items. Return ONLY the JSON array, no other text.\n\n"
-                        f"{markdown[:12000]}"
+                        f"Only include items that have both a clear product name and a numeric price visible in the text. "
+                        f"Return ONLY the JSON array, no other text.\n\n"
+                        f"{content[:8000]}"
                     ),
                 }
             ],
@@ -124,11 +107,10 @@ def scrape_products(url: str, site: str) -> list[dict]:
         products = json.loads(match.group())
         for p in products:
             p["site"] = site
-            p["source_url"] = url
-        log.info(f"  [{site}] {url} → {len(products)} products")
+        log.info(f"  [{site}] '{query}' → {len(products)} products")
         return products
     except Exception as e:
-        log.warning(f"  [{site}] Failed to scrape {url}: {e}")
+        log.warning(f"  [{site}] Search failed for '{query}': {e}")
         return []
 
 
@@ -182,7 +164,7 @@ def send_sms_alert(product: dict):
     price = product.get("price", "N/A")
     reason = product.get("reason", "")
     site = product.get("site", "")
-    url = product.get("url") or product.get("source_url", "No link available")
+    url = product.get("url", "No link available")
 
     body = (
         f"PRICE ERROR ALERT\n"
@@ -205,35 +187,31 @@ def send_sms_alert(product: dict):
 
 
 def run_scan():
-    """Run a full scan across all configured sites and categories."""
+    """Run a full scan across all configured search queries."""
     log.info(f"=== Scan started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
     total_products = 0
     total_flagged = 0
+    all_products = []
 
-    for target in SCAN_TARGETS:
-        site = target["site"]
-        log.info(f"Scanning {site}...")
-        all_products = []
+    for target in SEARCH_QUERIES:
+        products = search_products(target["query"], target["site"])
+        all_products.extend(products)
 
-        for url in target["urls"]:
-            products = scrape_products(url, site)
-            all_products.extend(products)
+    total_products = len(all_products)
+    log.info(f"Total products found: {total_products}")
 
-        total_products += len(all_products)
-        log.info(f"  [{site}] Total products scraped: {len(all_products)}")
+    # Process in batches of 50
+    batch_size = 50
+    for i in range(0, len(all_products), batch_size):
+        batch = all_products[i : i + batch_size]
+        flagged = check_prices_with_claude(batch)
+        total_flagged += len(flagged)
 
-        # Process in batches of 50 to avoid overly long prompts
-        batch_size = 50
-        for i in range(0, len(all_products), batch_size):
-            batch = all_products[i : i + batch_size]
-            flagged = check_prices_with_claude(batch)
-            total_flagged += len(flagged)
-
-            for product in flagged:
-                log.warning(
-                    f"PRICE ERROR: {product['name']} @ ${product['price']} on {site} — {product['reason']}"
-                )
-                send_sms_alert(product)
+        for product in flagged:
+            log.warning(
+                f"PRICE ERROR: {product['name']} @ ${product['price']} on {product['site']} — {product['reason']}"
+            )
+            send_sms_alert(product)
 
     log.info(
         f"=== Scan complete: {total_products} products scanned, {total_flagged} errors flagged ==="
