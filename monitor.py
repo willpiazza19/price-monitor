@@ -5,8 +5,8 @@ from datetime import datetime
 from dotenv import load_dotenv
 from apscheduler.schedulers.blocking import BlockingScheduler
 import feedparser
+import requests
 import anthropic
-from twilio.rest import Client as TwilioClient
 
 load_dotenv()
 
@@ -21,7 +21,21 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-twilio = TwilioClient(os.environ["TWILIO_ACCOUNT_SID"], os.environ["TWILIO_AUTH_TOKEN"])
+
+# --- Alert channels (configure either Telegram or Twilio) ---
+# Telegram is preferred if set; otherwise we fall back to Twilio SMS.
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
+TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
+TWILIO_FROM_NUMBER = os.environ.get("TWILIO_FROM_NUMBER", "").strip()
+TWILIO_TO_NUMBER = os.environ.get("TWILIO_TO_NUMBER", "").strip()
+
+twilio_client = None
+if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
+    from twilio.rest import Client as TwilioClient
+    twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
 USER_AGENT = "price-monitor-bot/1.0 (personal deal alerter)"
 
@@ -41,7 +55,7 @@ video games, laptops and computers, and home appliances (refrigerators, washers,
 The goal is to catch genuinely strong deals — steep discounts, all-time-low prices, or items with
 good resale value."""
 
-MAX_ALERTS_PER_CYCLE = 5  # avoid getting blasted with texts
+MAX_ALERTS_PER_CYCLE = 5  # avoid getting blasted with alerts
 
 DEAL_JUDGE_PROMPT = """You are a deal-evaluation assistant. The user resells consumer electronics and wants alerts ONLY for genuinely strong deals matching their interests.
 
@@ -66,6 +80,33 @@ Deals:
 # we re-seed silently so you never get spammed with old deals after a redeploy).
 seen_ids = set()
 first_run = True
+
+
+def send_alert(text: str) -> bool:
+    """Send an alert via Telegram (preferred) or Twilio SMS (fallback)."""
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        try:
+            resp = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                data={"chat_id": TELEGRAM_CHAT_ID, "text": text, "disable_web_page_preview": False},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            return True
+        except Exception as e:
+            log.error(f"Telegram send failed: {e}")
+            return False
+
+    if twilio_client and TWILIO_FROM_NUMBER and TWILIO_TO_NUMBER:
+        try:
+            twilio_client.messages.create(body=text, from_=TWILIO_FROM_NUMBER, to=TWILIO_TO_NUMBER)
+            return True
+        except Exception as e:
+            log.error(f"Twilio send failed: {e}")
+            return False
+
+    log.warning("No alert channel configured (set Telegram or Twilio env vars).")
+    return False
 
 
 def fetch_feed(feed: dict) -> list[dict]:
@@ -131,23 +172,16 @@ def judge_deals(deals: list[dict]) -> list[dict]:
     return flagged
 
 
-def send_sms_alert(deal: dict):
-    """Send an SMS alert for a flagged deal."""
+def alert_deal(deal: dict):
+    """Format and send an alert for a flagged deal."""
     body = (
         f"DEAL ALERT ({deal['source']})\n"
         f"{deal['title']}\n"
         f"Why: {deal['reason']}\n"
         f"Link: {deal['link']}"
     )
-    try:
-        twilio.messages.create(
-            body=body,
-            from_=os.environ["TWILIO_FROM_NUMBER"],
-            to=os.environ["TWILIO_TO_NUMBER"],
-        )
-        log.info(f"SMS sent: {deal['title']}")
-    except Exception as e:
-        log.error(f"Failed to send SMS for '{deal['title']}': {e}")
+    if send_alert(body):
+        log.info(f"Alert sent: {deal['title']}")
 
 
 def run_scan():
@@ -174,7 +208,7 @@ def run_scan():
     flagged = judge_deals(new_deals)
     for deal in flagged[:MAX_ALERTS_PER_CYCLE]:
         log.warning(f"DEAL: {deal['title']} — {deal['reason']}")
-        send_sms_alert(deal)
+        alert_deal(deal)
 
     log.info(
         f"=== Scan complete: {len(new_deals)} new, {len(flagged)} matched, "
@@ -182,22 +216,19 @@ def run_scan():
     )
 
 
-def send_startup_text():
-    """Send a one-time confirmation text on boot so you know the monitor is live."""
-    try:
-        twilio.messages.create(
-            body="Deal Monitor is now LIVE and watching for deals. (This is a startup test.)",
-            from_=os.environ["TWILIO_FROM_NUMBER"],
-            to=os.environ["TWILIO_TO_NUMBER"],
-        )
-        log.info("Startup confirmation text sent.")
-    except Exception as e:
-        log.error(f"Startup text failed (check Twilio credentials): {e}")
+def send_startup_alert():
+    """Send a one-time confirmation on boot so you know the monitor is live."""
+    if send_alert("Deal Monitor is now LIVE and watching for deals. (Startup test.)"):
+        log.info("Startup confirmation alert sent.")
+    else:
+        log.error("Startup alert failed — check your Telegram or Twilio settings.")
 
 
 def main():
     log.info("Deal Alert Monitor starting up...")
-    send_startup_text()
+    channel = "Telegram" if (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID) else "Twilio SMS" if twilio_client else "NONE"
+    log.info(f"Alert channel: {channel}")
+    send_startup_alert()
     log.info("Running initial scan (seeding existing deals)...")
     run_scan()
 
