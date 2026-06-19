@@ -182,8 +182,22 @@ def run_scan():
     )
 
 
+def send_startup_text():
+    """Send a one-time confirmation text on boot so you know the monitor is live."""
+    try:
+        twilio.messages.create(
+            body="Deal Monitor is now LIVE and watching for deals. (This is a startup test.)",
+            from_=os.environ["TWILIO_FROM_NUMBER"],
+            to=os.environ["TWILIO_TO_NUMBER"],
+        )
+        log.info("Startup confirmation text sent.")
+    except Exception as e:
+        log.error(f"Startup text failed (check Twilio credentials): {e}")
+
+
 def main():
     log.info("Deal Alert Monitor starting up...")
+    send_startup_text()
     log.info("Running initial scan (seeding existing deals)...")
     run_scan()
 
