@@ -39,39 +39,56 @@ if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
 
 USER_AGENT = "price-monitor-bot/1.0 (personal deal alerter)"
 
-# Public deal feeds — RSS/Atom, designed to be read by bots, never blocked.
+# Deal feeds tuned to what Eric actually wants. Slickdeals keyword searches + the
+# menswear-deals community. RSS/Atom — designed to be read by bots, never blocked.
+def _sd(query):
+    return f"https://slickdeals.net/newsearch.php?q={query}&searcharea=deals&searchin=first&rss=1"
+
 FEEDS = [
-    {"name": "Slickdeals Frontpage", "url": "https://slickdeals.net/newsearch.php?mode=frontpage&searcharea=deals&searchin=first&rss=1"},
-    {"name": "Slickdeals Popular", "url": "https://feeds.feedburner.com/SlickdealsnetFP"},
-    {"name": "r/deals", "url": "https://www.reddit.com/r/deals/new/.rss"},
-    {"name": "r/buildapcsales", "url": "https://www.reddit.com/r/buildapcsales/new/.rss"},
-    {"name": "r/GameDeals", "url": "https://www.reddit.com/r/GameDeals/new/.rss"},
-    {"name": "r/Frugal_Tech", "url": "https://www.reddit.com/r/Frugal_Tech/new/.rss"},
+    # Golf & fishing
+    {"name": "Slickdeals golf", "url": _sd("golf")},
+    {"name": "Slickdeals fishing", "url": _sd("fishing")},
+    # Clothing brands
+    {"name": "Slickdeals lululemon", "url": _sd("lululemon")},
+    {"name": "Slickdeals vuori", "url": _sd("vuori")},
+    {"name": "Slickdeals chubbies", "url": _sd("chubbies")},
+    {"name": "Slickdeals Peter Millar", "url": _sd("peter+millar")},
+    {"name": "Slickdeals Johnnie-O", "url": _sd("johnnie-o")},
+    {"name": "Slickdeals Vineyard Vines", "url": _sd("vineyard+vines")},
+    {"name": "Slickdeals Rhoback", "url": _sd("rhoback")},
+    # Menswear deals community (Lululemon, Vuori, etc. show up here constantly)
+    {"name": "r/frugalmalefashion", "url": "https://www.reddit.com/r/frugalmalefashion/new/.rss"},
 ]
 
 # What you care about. Edit this freely — Claude uses it to decide what to alert on.
-INTERESTS = """TVs (4K, OLED, QLED), electronics, gaming consoles (PlayStation, Xbox, Nintendo),
-video games, laptops and computers, and home appliances (refrigerators, washers, dryers, dishwashers).
-The goal is to catch genuinely strong deals — steep discounts, all-time-low prices, or items with
-good resale value."""
+INTERESTS = """I am shopping for MYSELF (not reselling). Alert me ONLY on standout deals —
+steep discounts, clearance, or all-time-low prices — on these:
 
-MAX_ALERTS_PER_CYCLE = 5  # avoid getting blasted with alerts
+GOLF: golf clubs (drivers, irons, putters, wedges), golf balls, golf gloves, golf bags.
+FISHING: fishing rods/poles, reels, hooks, weights/sinkers, tackle.
+CLOTHING (these brands specifically): Lululemon, Vuori, Chubbies, Peter Millar,
+Johnnie-O, Vineyard Vines, Rhoback.
 
-DEAL_JUDGE_PROMPT = """You are a deal-evaluation assistant. The user resells consumer electronics and wants alerts ONLY for genuinely strong deals matching their interests.
+Ignore anything outside these. Ignore mediocre or everyday discounts — only genuinely
+strong deals worth jumping on for personal use."""
+
+MAX_ALERTS_PER_CYCLE = 15  # ~5 per category (golf / fishing / clothing)
+
+DEAL_JUDGE_PROMPT = """You are a personal-shopping deal filter. The user is buying for HIMSELF (not reselling), and only wants alerts for STANDOUT deals matching his interests.
 
 User's interests:
 {interests}
 
-Below is a numbered list of deals pulled from deal-aggregator feeds. Select ONLY the ones that are BOTH:
-1. Clearly in the user's interest categories, AND
-2. Genuinely strong deals (steep discount, notable price, or good resale potential).
+Below is a numbered list of deals from deal feeds. Select ONLY deals that are BOTH:
+1. Clearly one of the user's wanted items or brands, AND
+2. A STANDOUT deal — steep discount, clearance, or notably low / all-time-low price (NOT an everyday or mediocre discount).
 
-Be SELECTIVE. It is better to flag 1-2 great deals than 10 mediocre ones. Skip generic, low-value, or accessory deals.
+Be very selective. Skip anything generic, marginal, or outside his interests. Aim for at most ~5 per category (golf, fishing, clothing).
 
 For each deal you select, output exactly one line in this format:
 INDEX|REASON
 
-Where INDEX is the number and REASON is a short phrase on why it's worth it. Output nothing for deals you don't select. If none qualify, output nothing.
+Where REASON is a short phrase on why it's a standout. Output nothing for deals you don't select. If none qualify, output nothing.
 
 Deals:
 {deal_list}"""
