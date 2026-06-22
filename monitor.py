@@ -58,6 +58,10 @@ FEEDS = [
     {"name": "Slickdeals Rhoback", "url": _sd("rhoback")},
     # Menswear deals community (Lululemon, Vuori, etc. show up here constantly)
     {"name": "r/frugalmalefashion", "url": "https://www.reddit.com/r/frugalmalefashion/new/.rss"},
+    # Fragrances (designer + niche)
+    {"name": "Slickdeals cologne", "url": _sd("cologne")},
+    {"name": "Slickdeals fragrance", "url": _sd("fragrance")},
+    {"name": "r/fragrancedeals", "url": "https://www.reddit.com/r/fragrancedeals/new/.rss"},
 ]
 
 # What you care about. Edit this freely — Claude uses it to decide what to alert on.
@@ -69,10 +73,14 @@ FISHING: fishing rods/poles, reels, hooks, weights/sinkers, tackle.
 CLOTHING (these brands specifically): Lululemon, Vuori, Chubbies, Peter Millar,
 Johnnie-O, Vineyard Vines, Rhoback.
 
+FRAGRANCES: designer and niche colognes/fragrances — but ONLY from reputable, established
+retailers (e.g. FragranceX, FragranceNet, Jomashop, Notino, Macy's, Nordstrom, Sephora, Ulta,
+or the brand's official site). Skip unknown/sketchy fragrance sites and obvious fakes.
+
 Ignore anything outside these. Ignore mediocre or everyday discounts — only genuinely
 strong deals worth jumping on for personal use."""
 
-MAX_ALERTS_PER_CYCLE = 15  # ~5 per category (golf / fishing / clothing)
+MAX_ALERTS_PER_CYCLE = 20  # ~5 per category (golf / fishing / clothing / fragrance)
 
 DEAL_JUDGE_PROMPT = """You are a personal-shopping deal filter. The user is buying for HIMSELF (not reselling), and only wants alerts for STANDOUT deals matching his interests.
 
@@ -83,7 +91,7 @@ Below is a numbered list of deals from deal feeds. Select ONLY deals that are BO
 1. Clearly one of the user's wanted items or brands, AND
 2. A STANDOUT deal — steep discount, clearance, or notably low / all-time-low price (NOT an everyday or mediocre discount).
 
-Be very selective. Skip anything generic, marginal, or outside his interests. Aim for at most ~5 per category (golf, fishing, clothing).
+Be very selective. Skip anything generic, marginal, or outside his interests. Aim for at most ~5 per category (golf, fishing, clothing, fragrance). For fragrances, only flag deals from reputable/established retailers — skip unknown or sketchy sites.
 
 For each deal you select, output exactly one line in this format:
 INDEX|REASON
